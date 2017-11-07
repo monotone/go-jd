@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -35,9 +36,9 @@ var (
 	order  = flag.Bool("order", false, "submit the order to JingDong when get the Goods.")
 	goods  = flag.String("goods", "", `the goods you want to by, find it from JD website. 
 	Single Goods:
-	  2567304(:1)
+		produceID(:expectNum:expectPrice)
 	Multiple Goods:
-	  2567304(:1),3133851(:2)`)
+		produceID(:expectNum:expectPrice),produceID(:expectNum:expectPrice)`)
 )
 
 func main() {
@@ -68,26 +69,49 @@ func main() {
 //
 // Example as following:
 //
-//   2567304				single goods with default count 1
-//   2567304:3				single goods with count 3
-//   2567304,3133851:4		multiple goods with defferent count 1, 4
-//   2567304:2,3133851:5	...
+//   2567304				single goods with default count 1, and any price
+//   2567304:3				single goods with count 3, and any price
+//   2567304,3133851:4		multiple goods with defferent count 1, 4, and any price
+//   2567304:2:300,3133851:5:200	...
 //
-func parseGoods(goods string) map[string]int {
-	lst := make(map[string]int)
+func parseGoods(goods string) []*core.ExpectProduct {
+	lst := make([]*core.ExpectProduct, 0)
 	if goods == "" {
 		return lst
 	}
 
+	var err error
 	for _, good := range strings.Split(goods, ",") {
 		pair := strings.Split(good, ":")
-		name := strings.Trim(pair[0], " ")
-		if len(pair) == 2 {
-			v, _ := strconv.ParseInt(pair[1], 10, 32)
-			lst[name] = int(v)
-		} else {
-			lst[name] = 1
+		id := strings.Trim(pair[0], " ")
+		num := 1
+		if len(pair) > 1 {
+			v, err := strconv.ParseInt(pair[1], 10, 32)
+			if err != nil {
+				panic(err)
+			}
+			num = int(v)
 		}
+		if num < 1 {
+			panic("not a valid product count value")
+		}
+
+		price := math.MaxFloat64
+		if len(pair) > 2 {
+			price, err = strconv.ParseFloat(pair[2], 64)
+			if err != nil {
+				panic(err)
+			}
+		}
+		if price < 0 {
+			panic("not a valid price count value")
+		}
+
+		lst = append(lst, &core.ExpectProduct{
+			ID:    id,
+			Num:   num,
+			Price: price,
+		})
 	}
 
 	return lst

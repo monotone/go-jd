@@ -78,13 +78,14 @@ type JDConfig struct {
 
 // SKUInfo ...
 type SKUInfo struct {
-	ID        string
-	Price     string
-	Count     int    // buying count
-	State     string // stock state 33 : on sale, 34 : out of stock
-	StateName string // "现货" / "无货"
-	Name      string
-	Link      string
+	ID          string
+	ExpectPrice float64
+	Price       float64
+	Count       int    // buying count
+	State       string // stock state 33 : on sale, 34 : out of stock
+	StateName   string // "现货" / "无货"
+	Name        string
+	Link        string
 }
 
 // JingDong wrap jing dong operation
@@ -716,7 +717,7 @@ func (jd *JingDong) getResponse(method, URL string, queryFun func(URL string) st
 //
 //  [{"id":"J_5105046","p":"1999.00","m":"9999.00","op":"1999.00","tpp":"1949.00"}]
 //
-func (jd *JingDong) getPrice(ID string) (string, error) {
+func (jd *JingDong) getPrice(ID string) (float64, error) {
 	data, err := jd.getResponse("GET", URLGoodsPrice, func(URL string) string {
 		u, _ := url.Parse(URLGoodsPrice)
 		q := u.Query()
@@ -724,22 +725,28 @@ func (jd *JingDong) getPrice(ID string) (string, error) {
 		q.Set("skuIds", "J_"+ID)
 		q.Set("pduid", strconv.FormatInt(time.Now().Unix()*1000, 10))
 		u.RawQuery = q.Encode()
+		fmt.Println(u.String())
 		return u.String()
 	})
 
 	if err != nil {
 		clog.Error(0, "获取商品（%s）价格失败: %+v", ID, err)
-		return "", err
+		return 0, err
 	}
 
 	var js *sjson.Json
 	if js, err = sjson.NewJson(data); err != nil {
 		clog.Info("Response Data: %s", data)
 		clog.Error(0, "解析响应数据失败: %+v", err)
-		return "", err
+		return 0, err
 	}
 
-	return js.GetIndex(0).Get("p").String()
+	str, err := js.GetIndex(0).Get("p").String()
+	if err != nil {
+		return 0, err
+	}
+
+	return strconv.ParseFloat(str, 64)
 }
 
 // stockState return stock state
@@ -761,6 +768,7 @@ func (jd *JingDong) stockState(ID string) (string, string, error) {
 		//q.Set("cat", "1,1,1")
 		//q.Set("buyNum", strconv.Itoa(1))
 		u.RawQuery = q.Encode()
+		fmt.Println(u.String())
 		return u.String()
 	})
 
@@ -825,8 +833,14 @@ func (jd *JingDong) skuDetail(ID string) (*SKUInfo, error) {
 	g.Name = truncate(g.Name)
 
 	// ? 为什么不直接从商品详情页拿价格呢？
-	g.Price, _ = jd.getPrice(ID)
-	g.State, g.StateName, _ = jd.stockState(ID)
+	g.Price, err = jd.getPrice(ID)
+	if err != nil {
+		return nil, err
+	}
+	g.State, g.StateName, err = jd.stockState(ID)
+	if err != nil {
+		return nil, err
+	}
 
 	clog.Info("编号: %s, 库存: %s, 价格: %s, 链接: %s", g.ID, g.StateName, g.Price, g.Link)
 
@@ -920,6 +934,17 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 	clog.Info(strSeperater)
 	clog.Info("购买商品: %s", sku.ID)
 
+	// 是否符合购买需求
+	for sku.Price > sku.ExpectPrice && jd.AutoRush {
+		clog.Info("商品%s当前价格（%.2f) 超出期望价格（%.2f)，开始监听。", sku.ID, sku.Price, sku.ExpectPrice)
+		time.Sleep(jd.Period)
+		sku.Price, err = jd.getPrice(sku.ID)
+		if err != nil {
+			clog.Error(0, "获取(%s)价格失败: %+v", sku.ID, err)
+			return err
+		}
+	}
+
 	// 33 : on sale
 	// 34 : out of stock
 	for sku.State != "33" && jd.AutoRush {
@@ -930,6 +955,10 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 			clog.Error(0, "获取(%s)库存失败: %+v", sku.ID, err)
 			return err
 		}
+	}
+
+	if sku.Price > sku.ExpectPrice || sku.State != "33" {
+		return errors.New("不满足下单条件")
 	}
 
 	if sku.Link == "" || sku.Count != 1 {
@@ -980,20 +1009,26 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 	return err
 }
 
-func (jd *JingDong) RushBuy(skuLst map[string]int) {
-	var wg sync.WaitGroup
-	for id, cnt := range skuLst {
-		wg.Add(1)
-		go func(id string, count int) {
-			defer wg.Done()
-			if sku, err := jd.skuDetail(id); err == nil {
-				sku.Count = count
-				if err = jd.buyGood(sku); err != nil {
-					clog.Error(0, "加入 %d 个 %s 到购物车失败", sku.Count, err.Error())
-				}
+type ExpectProduct struct {
+	ID    string
+	Num   int
+	Price float64
+}
 
+func (jd *JingDong) RushBuy(skuLst []*ExpectProduct) {
+	var wg sync.WaitGroup
+	for _, p := range skuLst {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if sku, err := jd.skuDetail(p.ID); err == nil {
+				sku.ExpectPrice = p.Price
+				sku.Count = p.Num
+				if err = jd.buyGood(sku); err != nil {
+					clog.Error(0, "加入 %d 个 %s 到购物车失败：%s", sku.Count, sku.ID, err.Error())
+				}
 			}
-		}(id, cnt)
+		}()
 	}
 
 	wg.Wait()
