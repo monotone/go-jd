@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Adyzng/go-jd/core"
+	"github.com/monotone/go-jd/core"
 	clog "gopkg.in/clog.v1"
 )
 
 func init() {
 	if err := clog.New(clog.CONSOLE, clog.ConsoleConfig{
-		Level:      clog.INFO,
+		Level:      clog.TRACE,
 		BufferSize: 100},
 	); err != nil {
 		fmt.Printf("init console log failed. error %+v.", err)
@@ -23,11 +23,13 @@ func init() {
 }
 
 const (
-	AreaBeijing = "1_72_2799_0"
+	AreaBeijing                      = "1_72_2799_0"
+	Area_HuNan_ChangShaShi_KaiFuQu   = "18-1482-48938"
+	AreaHunanShaoyangShaodongChengqu = "18_1511_1513_40429"
 )
 
 var (
-	area   = flag.String("area", AreaBeijing, "ship location string, default to Beijing")
+	area   = flag.String("area", AreaHunanShaoyangShaodongChengqu, "ship location string, default to Beijing")
 	period = flag.Int("period", 500, "the refresh period when out of stock, unit: ms.")
 	rush   = flag.Bool("rush", false, "continue to refresh when out of stock.")
 	order  = flag.Bool("order", false, "submit the order to JingDong when get the Goods.")
@@ -56,6 +58,7 @@ func main() {
 	defer jd.Release()
 	if err := jd.Login(); err == nil {
 		jd.CartDetails()
+		fmt.Println()
 		jd.RushBuy(gs)
 	}
 }

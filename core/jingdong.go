@@ -22,6 +22,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/axgle/mahonia"
 	sjson "github.com/bitly/go-simplejson"
+	"github.com/pkg/errors"
 	clog "gopkg.in/clog.v1"
 )
 
@@ -49,11 +50,16 @@ var (
 	}
 
 	DefaultHeaders = map[string]string{
-		"User-Agent":      "Chrome/51.0.2704.103",
-		"ContentType":     "application/json", //"text/html; charset=utf-8",
+		"User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36",
+		"Content-Type":    "application/x-www-form-urlencoded",
+		"Accept":          "application/json, text/javascript, */*; q=0.01", //"text/html; charset=utf-8",
 		"Connection":      "keep-alive",
-		"Accept-Encoding": "gzip, deflate",
+		"Accept-Encoding": "gzip, deflate, br",
 		"Accept-Language": "zh-CN,zh;q=0.8",
+		// "Origin":           "https://cart.jd.com",
+		"X-Requested-With": "XMLHttpRequest",
+
+		// Referer: https://cart.jd.com/cart.action
 	}
 
 	maxNameLen   = 40
@@ -328,6 +334,7 @@ func (jd *JingDong) waitForScan(URL string) error {
 	req.Header.Set("Referer", "https://passport.jd.com/new/login.aspx")
 	applyCustomHeader(req, DefaultHeaders)
 
+	// 页面上是回调60次后二维码失效
 	for retry := 50; retry != 0; retry-- {
 		if resp, err = jd.client.Do(req); err != nil {
 			clog.Info("二维码失效：%+v", err)
@@ -484,36 +491,33 @@ func (jd *JingDong) CartDetails() error {
 		clog.Error(0, "获取购物车详情错误: %+v", err)
 		return err
 	}
-
 	defer resp.Body.Close()
+
 	if doc, err = goquery.NewDocumentFromReader(resp.Body); err != nil {
 		clog.Error(0, "分析购物车页面错误: %+v.", err)
 		return err
 	}
 
 	clog.Info("购买  数量  价格      总价      编号      商品")
-	cartFormat := "%-6s%-6s%-10s%-10s%-10s%s"
+	cartFormat := "%-6s%-6s%-10s%-10s%-10s%s" // -用来指明左对齐
 
-	doc.Find("div.item-form").Each(func(i int, p *goquery.Selection) {
+	// 查找所有class属性包含item-item的div
+	doc.Find("div[class*='item-item item-selected']").Each(func(i int, p *goquery.Selection) {
+		// 购物车太乱，只显示当前选中的商品吧
 		check := " -"
-		checkTag := p.Find("div.cart-checkbox input").Eq(0)
-		if _, exist := checkTag.Attr("checked"); exist {
-			check = " +"
-		}
+		// checkTag := p.Find("div.cart-checkbox input").Eq(0)
+		// if _, exist := checkTag.Attr("checked"); exist {
+		check = " +"
+		// }
 
 		count := "0"
-		countTag := p.Find("div.quantity-form input").Eq(0)
-		if val, exist := countTag.Attr("value"); exist {
+		if val, exist := p.Attr("num"); exist {
 			count = val
 		}
 
 		pid := ""
-		hrefTag := p.Find("div.p-img a").Eq(0)
-		if href, exist := hrefTag.Attr("href"); exist {
-			// http://item.jd.com/2967929.html
-			pos1 := strings.LastIndex(href, "/")
-			pos2 := strings.LastIndex(href, ".")
-			pid = href[pos1+1 : pos2]
+		if idStr, exist := p.Attr("id"); exist {
+			pid = strings.TrimPrefix(idStr, "product_")
 		}
 
 		price := strings.Trim(p.Find("div.p-price strong").Eq(0).Text(), " ")
@@ -521,6 +525,10 @@ func (jd *JingDong) CartDetails() error {
 		gname := strings.Trim(p.Find("div.p-name a").Eq(0).Text(), " \n\t")
 		gname = truncate(gname)
 		clog.Info(cartFormat, check, count, price, total, pid, gname)
+
+		// TODO: 取消掉所有不相关商品的选中勾选状态
+		// TODO: 如果购物车已经有指定数量的指定商品了，并且是有货的，就直接下单吧
+		// TODO: 检查价格条件是否满足
 	})
 
 	totalCount := strings.Trim(doc.Find("div.amount-sum em").Eq(0).Text(), " ")
@@ -543,6 +551,14 @@ func (jd *JingDong) OrderInfo() error {
 
 	clog.Info(strSeperater)
 	clog.Info("订单详情>")
+
+	// 发送使用最有优惠券组合
+	URLBestCoupons := "http://trade.jd.com/shopping/dynamic/coupon/getBestVertualCoupons.action"
+	_, err = jd.getResponse("POST", URLBestCoupons, nil)
+	if err != nil {
+		clog.Error(0, "请求使用最优组合券失败：%s", err.Error())
+		return err
+	}
 
 	u, _ := url.Parse(URLOrderInfo)
 	q := u.Query()
@@ -570,17 +586,38 @@ func (jd *JingDong) OrderInfo() error {
 
 	if order := doc.Find("div.order-summary").Eq(0); order != nil {
 		warePrice := strings.Trim(order.Find("#warePriceId").Text(), " \t\n")
+		cashBack := strings.Trim(order.Find("#cachBackId").Text(), " \t\n")
 		shipPrice := strings.Trim(order.Find("#freightPriceId").Text(), " \t\n")
-		clog.Info("总金额: %s", warePrice)
-		clog.Info("　运费: %s", shipPrice)
+		servicePrice := strings.Trim(order.Find("#serviceFeeId").Text(), " \t\n")
+		couponPrice := strings.Trim(order.Find("#couponPriceId").Text(), " \t\n")
+		freightPrice := strings.Trim(order.Find("#freeFreightPriceId").Text(), " \t\n")
 
+		if !strings.Contains(warePrice, "￥0.00") {
+			clog.Info("　总金额: %s", warePrice)
+		}
+		if !strings.Contains(cashBack, "￥0.00") {
+			clog.Info("　　返现: %s", cashBack)
+		}
+		if !strings.Contains(shipPrice, "￥0.00") {
+			clog.Info("　　运费: %s", shipPrice)
+		}
+		if !strings.Contains(servicePrice, "￥0.00") {
+			clog.Info("　服务费: %s", servicePrice)
+		}
+		if !strings.Contains(couponPrice, "￥0.00") {
+			clog.Info("商品优惠: %s", couponPrice)
+		}
+		if !strings.Contains(freightPrice, "￥0.00") {
+			clog.Info("运费优惠: %s", freightPrice)
+		}
 	}
 
 	if sum := doc.Find("div.trade-foot").Eq(0); sum != nil {
 		payment := strings.Trim(sum.Find("#sumPayPriceId").Text(), " \t\n")
 		phone := strings.Trim(sum.Find("#sendMobile").Text(), " \t\n")
 		addr := strings.Trim(sum.Find("#sendAddr").Text(), " \t\n")
-		clog.Info("应付款: %s", payment)
+
+		clog.Info("=======================>> 应付总额: %s", payment)
 		clog.Info("%s", phone)
 		clog.Info("%s", addr)
 	}
@@ -776,7 +813,7 @@ func (jd *JingDong) skuDetail(ID string) (*SKUInfo, error) {
 
 	if link, exist := doc.Find("a#InitCartUrl").Attr("href"); exist {
 		g.Link = link
-		if !strings.HasPrefix(link, "https:") {
+		if !strings.HasPrefix(link, "https:") { // 恩，加入购物车的链接，必须走https
 			g.Link = "https:" + link
 		}
 	}
@@ -787,26 +824,66 @@ func (jd *JingDong) skuDetail(ID string) (*SKUInfo, error) {
 	g.Name = strings.Trim(dec.ConvertString(doc.Find("div.sku-name").Text()), " \t\n")
 	g.Name = truncate(g.Name)
 
+	// ? 为什么不直接从商品详情页拿价格呢？
 	g.Price, _ = jd.getPrice(ID)
 	g.State, g.StateName, _ = jd.stockState(ID)
 
-	info := fmt.Sprintf("编号: %s, 库存: %s, 价格: %s, 链接: %s", g.ID, g.StateName, g.Price, g.Link)
-	clog.Info(info)
+	clog.Info("编号: %s, 库存: %s, 价格: %s, 链接: %s", g.ID, g.StateName, g.Price, g.Link)
 
 	return g, nil
 }
 
-func (jd *JingDong) changeCount(ID string, count int) (int, error) {
+func (jd *JingDong) changeCount(ID string, count int) error {
+	// 从购物车页面，获取ptype和promoID参数
+	var (
+		err  error
+		req  *http.Request
+		resp *http.Response
+		doc  *goquery.Document
+	)
+
+	if req, err = http.NewRequest("GET", URLCartInfo, nil); err != nil {
+		clog.Error(0, "请求（%+v）失败: %+v", URLCartInfo, err)
+		return err
+	}
+
+	if resp, err = jd.client.Do(req); err != nil {
+		clog.Error(0, "获取购物车详情错误: %+v", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if doc, err = goquery.NewDocumentFromReader(resp.Body); err != nil {
+		clog.Error(0, "分析购物车页面错误: %+v.", err)
+		return err
+	}
+
+	val, exist := doc.Find(fmt.Sprintf("input[p-type*='%s_']", ID)).Attr("value")
+	if !exist {
+		return errors.Errorf("找不到商品复选框内携带属性")
+	}
+	ss := strings.Split(val, "_")
+	if len(ss) < 2 {
+		return errors.Errorf("商品属性获取失败")
+	}
+	ptype := ss[1]
+	promoID := "0"
+	if len(ss) > 2 {
+		promoID = ss[2]
+	}
+
 	data, err := jd.getResponse("POST", URLChangeCount, func(URL string) string {
 		u, _ := url.Parse(URL)
 		q := u.Query()
+		q.Set("t", "0")
 		q.Set("venderId", "8888")
-		q.Set("targetId", "0")
-		q.Set("promoID", "0")
-		q.Set("outSkus", "")
-		q.Set("ptype", "1")
 		q.Set("pid", ID)
 		q.Set("pcount", strconv.Itoa(count))
+		q.Set("ptype", ptype) // TODO: 这个ptype不能是固定的哦
+		q.Set("targetId", promoID)
+		q.Set("packId", "0")
+		q.Set("promoID", promoID)
+		q.Set("outSkus", "")
 		q.Set("random", strconv.FormatFloat(rand.Float64(), 'f', 16, 64))
 		q.Set("locationId", jd.ShipArea)
 		u.RawQuery = q.Encode()
@@ -815,11 +892,23 @@ func (jd *JingDong) changeCount(ID string, count int) (int, error) {
 
 	if err != nil {
 		clog.Error(0, "修改商品数量失败: %+v", err)
-		return 0, err
+		return err
 	}
 
-	js, _ := sjson.NewJson(data)
-	return js.Get("pcount").Int()
+	js, err := sjson.NewJson(data)
+	if err != nil {
+		// clog.Trace(string(data))
+		return errors.Wrap(err, "unmarshal repsonse failed")
+	}
+	c, err := js.Get("pcount").Int()
+	if err != nil {
+		return err
+	}
+	if count != c {
+		return errors.New("未能设置成期望的数量")
+	}
+
+	return nil
 }
 
 func (jd *JingDong) buyGood(sku *SKUInfo) error {
@@ -869,22 +958,23 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 	}
 
 	succFlag := doc.Find("h3.ftx-02").Text()
-	//fmt.Println(succFlag)
-
 	if succFlag == "" {
 		succFlag = doc.Find("div.p-name a").Text()
 	}
 
 	if succFlag != "" {
-		count := 0
-		if sku.Count > 1 {
-			count, err = jd.changeCount(sku.ID, sku.Count)
+		// TODO: 这里应该是确保购物车里的数量是设置的数量就行了吧
+		err = jd.changeCount(sku.ID, sku.Count)
+		if err != nil {
+			return err
 		}
 
-		if count > 0 {
-			clog.Info("成功加入进购物车 %d 个 %s", count, sku.Name)
-			return nil
-		}
+		// if err == nil && count > 0 {
+		clog.Info("成功加入进购物车 %d 个 %s", sku.Count, sku.Name)
+		return nil
+		// }
+	} else {
+		err = errors.New("找不到加入购物车成功的标记")
 	}
 
 	return err
@@ -898,12 +988,16 @@ func (jd *JingDong) RushBuy(skuLst map[string]int) {
 			defer wg.Done()
 			if sku, err := jd.skuDetail(id); err == nil {
 				sku.Count = count
-				jd.buyGood(sku)
+				if err = jd.buyGood(sku); err != nil {
+					clog.Error(0, "加入 %d 个 %s 到购物车失败", sku.Count, err.Error())
+				}
+
 			}
 		}(id, cnt)
 	}
 
 	wg.Wait()
+	fmt.Println()
 	jd.OrderInfo()
 
 	if jd.AutoSubmit {

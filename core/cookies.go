@@ -47,7 +47,7 @@ type SimpleJar struct {
 //
 func NewSimpleJar(option JarOption) *SimpleJar {
 	if option.Filename == "" {
-		option.JarType = JarMemory
+		option.JarType = JarJson // change from JarMemory to JarJson. I think is a bug
 	}
 
 	return &SimpleJar{
@@ -134,6 +134,7 @@ func (jar *SimpleJar) Persist() error {
 	case JarGob:
 		fd, err := os.Create(jar.filename)
 		if err == nil {
+			defer fd.Close()
 			err = gob.NewEncoder(fd).Encode(jar.cookies)
 		}
 		return err
@@ -141,7 +142,11 @@ func (jar *SimpleJar) Persist() error {
 	case JarJson:
 		fd, err := os.Create(jar.filename)
 		if err == nil {
-			err = json.NewEncoder(fd).Encode(jar.cookies)
+			defer fd.Close()
+			// add indent for json encoder, make the cookie file pretty
+			encoder := json.NewEncoder(fd)
+			encoder.SetIndent("", "	")
+			err = encoder.Encode(jar.cookies)
 		}
 		return err
 
