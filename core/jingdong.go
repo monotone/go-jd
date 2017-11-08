@@ -725,7 +725,7 @@ func (jd *JingDong) getPrice(ID string) (float64, error) {
 		q.Set("skuIds", "J_"+ID)
 		q.Set("pduid", strconv.FormatInt(time.Now().Unix()*1000, 10))
 		u.RawQuery = q.Encode()
-		fmt.Println(u.String())
+		// fmt.Println(u.String())
 		return u.String()
 	})
 
@@ -768,7 +768,7 @@ func (jd *JingDong) stockState(ID string) (string, string, error) {
 		//q.Set("cat", "1,1,1")
 		//q.Set("buyNum", strconv.Itoa(1))
 		u.RawQuery = q.Encode()
-		fmt.Println(u.String())
+		// fmt.Println(u.String())
 		return u.String()
 	})
 
@@ -934,33 +934,7 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 	clog.Info(strSeperater)
 	clog.Info("购买商品: %s", sku.ID)
 
-	// 是否符合购买需求
-	for sku.Price > sku.ExpectPrice && jd.AutoRush {
-		clog.Info("商品%s当前价格（%.2f) 超出期望价格（%.2f)，开始监听。", sku.ID, sku.Price, sku.ExpectPrice)
-		time.Sleep(jd.Period)
-		sku.Price, err = jd.getPrice(sku.ID)
-		if err != nil {
-			clog.Error(0, "获取(%s)价格失败: %+v", sku.ID, err)
-			return err
-		}
-	}
-
-	// 33 : on sale
-	// 34 : out of stock
-	for sku.State != "33" && jd.AutoRush {
-		clog.Warn("%s : %s", sku.StateName, sku.Name)
-		time.Sleep(jd.Period)
-		sku.State, sku.StateName, err = jd.stockState(sku.ID)
-		if err != nil {
-			clog.Error(0, "获取(%s)库存失败: %+v", sku.ID, err)
-			return err
-		}
-	}
-
-	if sku.Price > sku.ExpectPrice || sku.State != "33" {
-		return errors.New("不满足下单条件")
-	}
-
+	// 准备好商品购买链接
 	if sku.Link == "" || sku.Count != 1 {
 		u, _ := url.Parse(URLAdd2Cart)
 		q := u.Query()
@@ -976,6 +950,37 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 		return fmt.Errorf("无效商品购买链接<%s>", sku.Link)
 	}
 
+	// 检测是否达到购买条件
+	if sku.Price > sku.ExpectPrice || sku.State != "33" {
+		if !jd.AutoRush {
+			return errors.New("不满足下单条件")
+		}
+
+		// 只要有一个条件不满足，就全部重新测试
+		for sku.Price > sku.ExpectPrice || sku.State != "33" {
+			time.Sleep(jd.Period)
+
+			// 拿价钱
+			clog.Info("商品%s当前价格（%.2f) 超出期望价格（%.2f)，开始监听。", sku.ID, sku.Price, sku.ExpectPrice)
+			sku.Price, err = jd.getPrice(sku.ID)
+			if err != nil {
+				clog.Error(0, "获取(%s)价格失败: %+v", sku.ID, err)
+				return err
+			}
+			if sku.Price > sku.ExpectPrice {
+				continue
+			}
+
+			// 拿库存
+			sku.State, sku.StateName, err = jd.stockState(sku.ID)
+			if err != nil {
+				clog.Error(0, "获取(%s)库存失败: %+v", sku.ID, err)
+				return err
+			}
+		}
+	}
+
+	// 加入购物车
 	if data, err = jd.getResponse("GET", sku.Link, nil); err != nil {
 		clog.Error(0, "商品(%s)购买失败: %+v", sku.ID, err)
 		return err
@@ -989,24 +994,19 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 	succFlag := doc.Find("h3.ftx-02").Text()
 	if succFlag == "" {
 		succFlag = doc.Find("div.p-name a").Text()
-	}
-
-	if succFlag != "" {
-		// TODO: 这里应该是确保购物车里的数量是设置的数量就行了吧
-		err = jd.changeCount(sku.ID, sku.Count)
-		if err != nil {
-			return err
+		if succFlag == "" {
+			return errors.New("找不到加入购物车成功的标记")
 		}
-
-		// if err == nil && count > 0 {
-		clog.Info("成功加入进购物车 %d 个 %s", sku.Count, sku.Name)
-		return nil
-		// }
-	} else {
-		err = errors.New("找不到加入购物车成功的标记")
 	}
 
-	return err
+	err = jd.changeCount(sku.ID, sku.Count)
+	if err != nil {
+		return err
+	}
+
+	clog.Info("成功加入进购物车 %d 个 %s", sku.Count, sku.Name)
+	return nil
+
 }
 
 type ExpectProduct struct {
