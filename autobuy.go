@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/monotone/go-jd/core"
@@ -46,7 +48,7 @@ func main() {
 	defer clog.Shutdown()
 
 	gs := parseGoods(*goods)
-	clog.Trace("[Area: %+v, Goods: %qv, Period: %+v, Rush: %+v, Order: %+v]",
+	clog.Trace("[Area: %+v, Goods: %+v, Period: %+v, Rush: %+v, Order: %+v]",
 		*area, gs, *period, *rush, *order)
 
 	jd := core.NewJingDong(core.JDConfig{
@@ -56,12 +58,23 @@ func main() {
 		AutoSubmit: *order,
 	})
 
-	defer jd.Release()
+	go func() {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGTSTP)
+		<-signals
+		signal.Stop(signals)
+		jd.Release()
+
+		os.Exit(0)
+	}()
+
 	if err := jd.Login(); err == nil {
 		jd.CartDetails()
 		fmt.Println()
 		jd.RushBuy(gs)
 	}
+	jd.Release()
+
 }
 
 // parseGoods parse the input goods list. Support to input multiple goods sperated

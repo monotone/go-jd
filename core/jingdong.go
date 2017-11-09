@@ -114,7 +114,7 @@ func NewJingDong(option JDConfig) *JingDong {
 	}
 
 	jd.client = &http.Client{
-		Timeout: time.Minute,
+		Timeout: 10 * time.Second,
 		Jar:     jd.jar,
 	}
 
@@ -628,7 +628,7 @@ func (jd *JingDong) OrderInfo() error {
 
 // SubmitOrder ... submit order to JingDong, return orderID or error
 //
-func (jd *JingDong) SubmitOrder() (string, error) {
+func (jd *JingDong) SubmitOrder() int {
 	clog.Info(strSeperater)
 	clog.Info("提交订单>")
 
@@ -653,14 +653,14 @@ func (jd *JingDong) SubmitOrder() (string, error) {
 
 	if err != nil {
 		clog.Error(0, "提交订单失败: %+v", err)
-		return "", err
+		return -1
 	}
 
 	var js *sjson.Json
 	if js, err = sjson.NewJson(data); err != nil {
 		clog.Info("Reponse Data: %s", data)
 		clog.Error(0, "无法解析订单响应数据: %+v", err)
-		return "", err
+		return -1
 	}
 
 	clog.Trace("订单: %s", data)
@@ -668,13 +668,13 @@ func (jd *JingDong) SubmitOrder() (string, error) {
 	if succ, _ := js.Get("success").Bool(); succ {
 		orderID, _ := js.Get("orderId").Int64()
 		clog.Info("下单成功，订单号：%d", orderID)
-		return fmt.Sprintf("%d", orderID), nil
+		return 0
 	}
 
-	res, _ := js.Get("resultCode").String()
+	res, _ := js.Get("resultCode").Int()
 	msg, _ := js.Get("message").String()
-	clog.Error(0, "下单失败, %s : %s", res, msg)
-	return "", fmt.Errorf("failed to submit order (%s : %s)", res, msg)
+	clog.Error(0, "下单失败, %d : %s", res, msg)
+	return res
 }
 
 // wrap http get/post request
@@ -768,7 +768,7 @@ func (jd *JingDong) stockState(ID string) (string, string, error) {
 		//q.Set("cat", "1,1,1")
 		//q.Set("buyNum", strconv.Itoa(1))
 		u.RawQuery = q.Encode()
-		// fmt.Println(u.String())
+		fmt.Println(u.String())
 		return u.String()
 	})
 
@@ -842,7 +842,7 @@ func (jd *JingDong) skuDetail(ID string) (*SKUInfo, error) {
 		return nil, err
 	}
 
-	clog.Info("编号: %s, 库存: %s, 价格: %s, 链接: %s", g.ID, g.StateName, g.Price, g.Link)
+	clog.Info("编号: %s, 库存: %s, 价格: %.2f, 链接: %s", g.ID, g.StateName, g.Price, g.Link)
 
 	return g, nil
 }
@@ -950,36 +950,6 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 		return fmt.Errorf("无效商品购买链接<%s>", sku.Link)
 	}
 
-	// 检测是否达到购买条件
-	if sku.Price > sku.ExpectPrice || sku.State != "33" {
-		if !jd.AutoRush {
-			return errors.New("不满足下单条件")
-		}
-
-		// 只要有一个条件不满足，就全部重新测试
-		for sku.Price > sku.ExpectPrice || sku.State != "33" {
-			time.Sleep(jd.Period)
-
-			// 拿价钱
-			clog.Info("商品%s当前价格（%.2f) 超出期望价格（%.2f)，开始监听。", sku.ID, sku.Price, sku.ExpectPrice)
-			sku.Price, err = jd.getPrice(sku.ID)
-			if err != nil {
-				clog.Error(0, "获取(%s)价格失败: %+v", sku.ID, err)
-				return err
-			}
-			if sku.Price > sku.ExpectPrice {
-				continue
-			}
-
-			// 拿库存
-			sku.State, sku.StateName, err = jd.stockState(sku.ID)
-			if err != nil {
-				clog.Error(0, "获取(%s)库存失败: %+v", sku.ID, err)
-				return err
-			}
-		}
-	}
-
 	// 加入购物车
 	if data, err = jd.getResponse("GET", sku.Link, nil); err != nil {
 		clog.Error(0, "商品(%s)购买失败: %+v", sku.ID, err)
@@ -1005,8 +975,43 @@ func (jd *JingDong) buyGood(sku *SKUInfo) error {
 	}
 
 	clog.Info("成功加入进购物车 %d 个 %s", sku.Count, sku.Name)
-	return nil
 
+	// 检测是否达到购买条件
+	if sku.Price > sku.ExpectPrice || sku.State != "33" {
+		if !jd.AutoRush {
+			return errors.New("不满足下单条件")
+		}
+
+		// 只要有一个条件不满足，就全部重新测试
+		for sku.Price > sku.ExpectPrice || sku.State != "33" {
+			time.Sleep(jd.Period)
+
+			// 拿价钱
+			if sku.Price > sku.ExpectPrice {
+				clog.Info("商品%s当前价格（%.2f) 超出期望价格（%.2f)，开始监听。", sku.ID, sku.Price, sku.ExpectPrice)
+			}
+
+			sku.Price, err = jd.getPrice(sku.ID)
+			if err != nil {
+				clog.Error(0, "获取(%s)价格失败: %+v", sku.ID, err)
+				return err
+			}
+			if sku.Price > sku.ExpectPrice {
+				continue
+			}
+
+			// 拿库存
+			if sku.State != "33" {
+				clog.Info("商品%s库存不足，正在重新查询库存。", sku.ID)
+			}
+			sku.State, sku.StateName, err = jd.stockState(sku.ID)
+			if err != nil {
+				clog.Error(0, "获取(%s)库存失败: %+v", sku.ID, err)
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type ExpectProduct struct {
@@ -1036,6 +1041,25 @@ func (jd *JingDong) RushBuy(skuLst []*ExpectProduct) {
 	jd.OrderInfo()
 
 	if jd.AutoSubmit {
-		jd.SubmitOrder()
+
+	SUBMITORDER:
+		res := jd.SubmitOrder()
+		if res == 0 {
+			return
+		}
+
+		switch res {
+		case 0:
+			return
+		case 61036: // 预约抢购，暂不支持购买的商品
+			time.Sleep(4900 * time.Millisecond)
+		case 60017: // 您多次提交过快，请稍后再试
+			time.Sleep(1 * time.Second)
+		default:
+			clog.Error(0, "unknown resultCode for submitorder:", res)
+			return
+		}
+
+		goto SUBMITORDER
 	}
 }
