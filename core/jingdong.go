@@ -502,6 +502,11 @@ func (jd *JingDong) CartDetails() error {
 	clog.Info("购买  数量  价格      总价      编号      商品")
 	cartFormat := "%-6s%-6s%-10s%-10s%-10s%s" // -用来指明左对齐
 
+	// 觉得这里还是要从cart-item-list开始，在下一级是不同的厂商，比如京东自营等。在下一级是店铺shop相关信息和商品列表item-list了。
+	// 商品列表里每个子项是一组，item-suit这种是套装，item-full这种事有折扣的？
+
+	// 这里先清空掉所有的选中（除了套装还没实现）
+
 	// 查找所有class属性包含item-item的div
 	doc.Find("div[class*='item-item item-selected']").Each(func(i int, p *goquery.Selection) {
 		// 购物车太乱，只显示当前选中的商品吧
@@ -526,6 +531,39 @@ func (jd *JingDong) CartDetails() error {
 		gname := strings.Trim(p.Find("div.p-name a").Eq(0).Text(), " \n\t")
 		gname = truncate(gname)
 		clog.Info(cartFormat, check, count, price, total, pid, gname)
+
+		val, exist := doc.Find(fmt.Sprintf("input[p-type*='%s_']", pid)).Attr("value")
+		if !exist {
+			return
+		}
+		ss := strings.Split(val, "_")
+		if len(ss) < 2 {
+			return
+		}
+		ptype := ss[1]
+		promoID := "0"
+		if len(ss) > 2 {
+			promoID = ss[2]
+		}
+
+		// 取消选中
+		jd.getResponse(http.MethodPost, "https://cart.jd.com/cancelItem.action", func(URL string) string {
+			u, _ := url.Parse(URL)
+			q := u.Query()
+			q.Set("t", "0")
+			q.Set("venderId", "8888")
+			q.Set("pid", pid)
+			q.Set("ptype", ptype) // TODO: 这个ptype不能是固定的哦
+			q.Set("targetId", promoID)
+			q.Set("packId", "0")
+			q.Set("promoID", promoID)
+			q.Set("manFanZeng", promoID)
+			q.Set("outSkus", "")
+			q.Set("random", strconv.FormatFloat(rand.Float64(), 'f', 16, 64))
+			q.Set("locationId", jd.ShipArea)
+			u.RawQuery = q.Encode()
+			return u.String()
+		})
 
 		// TODO: 取消掉所有不相关商品的选中勾选状态
 		// TODO: 如果购物车已经有指定数量的指定商品了，并且是有货的，就直接下单吧
@@ -1054,6 +1092,9 @@ func (jd *JingDong) RushBuy(skuLst []*ExpectProduct) {
 		case 61036: // 预约抢购，暂不支持购买的商品
 			time.Sleep(4900 * time.Millisecond)
 		case 60017: // 您多次提交过快，请稍后再试
+			time.Sleep(1 * time.Second)
+			// 这种抢购商品提前加入购物车下单的竟然没用
+		case 600126: // 抱歉，玩客云 私人云盘 迅雷 赚钱宝 3代 不止会赚钱 极速下载 隐私加密 手机扩容 多屏播放 轻NAS 曜石黑正在参与抢购活动，请重新回到商品详情页，使用“立即抢购”进行购买
 			time.Sleep(1 * time.Second)
 		default:
 			clog.Error(0, "unknown resultCode for submitorder:", res)

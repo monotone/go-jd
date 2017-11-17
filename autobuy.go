@@ -61,8 +61,18 @@ func main() {
 	go func() {
 		signals := make(chan os.Signal, 1)
 		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGTSTP)
+
+		// t := time.NewTimer(10 * time.Second)
+		// select {
+		// case <-t.C:
+		// 	clog.Error(0, "30秒内仍没完成订单，退出。")
+		// 	t.Stop()
+		// 	break
+		// case
 		<-signals
 		signal.Stop(signals)
+		// }
+
 		jd.Release()
 
 		os.Exit(0)
